@@ -23,6 +23,7 @@ describe("gig_marketplace", () => {
   const thirdUser = Keypair.generate(); // New user for bidding tests
   const gigSeed = Buffer.from("gig");
   const bidSeed = Buffer.from("bid");
+  const solutionSeed = Buffer.from("solution");
   let gigPda: PublicKey;
   let bidPda: PublicKey;
 
@@ -351,7 +352,6 @@ describe("gig_marketplace", () => {
     logSection("Submitting Solution");
     
     const solutionUri = "ipfs://QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX";
-    const solutionSeed = Buffer.from("solution");
     
     const [solutionPda] = await PublicKey.findProgramAddressSync(
       [solutionSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
@@ -391,7 +391,6 @@ describe("gig_marketplace", () => {
     logSection("Multiple Solutions");
     
     const secondSolutionUri = "ipfs://QmYEA5BXdQUfR8vVXZhZF2mHQY4xtMVGYXmrwG1sYy6iBL";
-    const solutionSeed = Buffer.from("solution");
     
     const [secondSolutionPda] = await PublicKey.findProgramAddressSync(
       [solutionSeed, gigPda.toBuffer(), secondUser.publicKey.toBuffer()],
@@ -472,7 +471,6 @@ describe("gig_marketplace", () => {
     try {
       // Try to submit another solution from the third user on the same gig
       const duplicateSolutionUri = "ipfs://QmNewSolutionUri";
-      const solutionSeed = Buffer.from("solution");
       
       const [solutionPda] = await PublicKey.findProgramAddressSync(
         [solutionSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
@@ -496,5 +494,188 @@ describe("gig_marketplace", () => {
       assert.ok(error.toString().includes("Error"));
       logError("Duplicate solution rejected as expected", error);
     }
+  });
+
+  // Solution verification tests
+  it("Can verify a solution as successful", async () => {
+    logSection("Solution Verification - Success");
+    
+    // Get the solution PDA for third user
+    const [solutionPda] = await PublicKey.findProgramAddressSync(
+      [solutionSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    // Verify the solution as successful
+    await program.methods
+      .verifySolution({ approve: {} })
+      .accounts({
+        poster: provider.wallet.publicKey,
+        gig: gigPda,
+        solution: solutionPda,
+        agent: thirdUser.publicKey,
+      } as any)
+      .rpc();
+      
+    // Fetch the solution to verify status change
+    const solutionAccount = await program.account.submittedSolution.fetch(solutionPda);
+    
+    // Check that the status is now Success
+    assert.ok(solutionAccount.status.success !== undefined);
+    
+    logSuccess("Solution verified as successful", {
+      gig: solutionAccount.gig.toBase58(),
+      agent: solutionAccount.agent.toBase58(),
+      status: "Success"
+    });
+  });
+  
+  it("Can reject a solution as failed", async () => {
+    logSection("Solution Verification - Failure");
+    
+    // Get the solution PDA for second user
+    const [secondSolutionPda] = await PublicKey.findProgramAddressSync(
+      [solutionSeed, gigPda.toBuffer(), secondUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    // Reject the solution
+    await program.methods
+      .verifySolution({ reject: {} })
+      .accounts({
+        poster: provider.wallet.publicKey,
+        gig: gigPda,
+        solution: secondSolutionPda,
+        agent: secondUser.publicKey,
+      } as any)
+      .rpc();
+      
+    // Fetch the solution to verify status change
+    const solutionAccount = await program.account.submittedSolution.fetch(secondSolutionPda);
+    
+    // Check that the status is now Failed
+    assert.ok(solutionAccount.status.failed !== undefined);
+    
+    logSuccess("Solution rejected as failed", {
+      gig: solutionAccount.gig.toBase58(),
+      agent: solutionAccount.agent.toBase58(),
+      status: "Failed"
+    });
+  });
+  
+  it("Cannot verify a solution that is already verified", async () => {
+    logSection("Double Verification Test");
+    
+    // Get the solution PDA for third user (which we already approved)
+    const [solutionPda] = await PublicKey.findProgramAddressSync(
+      [solutionSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    try {
+      // Try to approve again
+      await program.methods
+        .verifySolution({ approve: {} })
+        .accounts({
+          poster: provider.wallet.publicKey,
+          gig: gigPda,
+          solution: solutionPda,
+          agent: thirdUser.publicKey,
+        } as any)
+        .rpc();
+        
+      assert.fail("Should have failed because solution is already verified");
+    } catch (error) {
+      assert.ok(error.toString().includes("Error"));
+      logError("Double verification correctly rejected", error);
+    }
+  });
+  
+  it("Only the gig poster can verify solutions", async () => {
+    logSection("Unauthorized Verification Test");
+    
+    // Create a new gig with secondUser as poster
+    const newGigId = "test-gig-authorization";
+    const newGigDescription = "Testing authorization constraints";
+    
+    const [newGigPda] = await PublicKey.findProgramAddressSync(
+      [gigSeed, Buffer.from(newGigId)],
+      program.programId
+    );
+    
+    await program.methods
+      .postGig(
+        newGigId,
+        newGigDescription,
+        new anchor.BN(1_500_000_000),
+        new anchor.BN(Date.now() + 7 * 24 * 60 * 60 * 1000)
+      )
+      .accounts({
+        poster: secondUser.publicKey,
+        gig: newGigPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([secondUser])
+      .rpc();
+    
+    // Submit a solution from third user
+    const newSolutionUri = "ipfs://QmTestAuthorizationSolution";
+    
+    const [newSolutionPda] = await PublicKey.findProgramAddressSync(
+      [solutionSeed, newGigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    await program.methods
+      .submitSolution(newSolutionUri)
+      .accounts({
+        agent: thirdUser.publicKey,
+        gig: newGigPda,
+        poster: secondUser.publicKey,
+        solution: newSolutionPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([thirdUser])
+      .rpc();
+    
+    try {
+      // Try to verify the solution with main user (who is not the poster)
+      await program.methods
+        .verifySolution({ approve: {} })
+        .accounts({
+          poster: provider.wallet.publicKey, // Not the poster of this gig
+          gig: newGigPda,
+          solution: newSolutionPda,
+          agent: thirdUser.publicKey,
+        } as any)
+        .rpc();
+        
+      assert.fail("Should have failed due to poster constraint");
+    } catch (error) {
+      assert.ok(error.toString().includes("Error"));
+      logError("Unauthorized verification correctly rejected", error);
+    }
+    
+    // Now verify with the correct poster
+    await program.methods
+      .verifySolution({ approve: {} })
+      .accounts({
+        poster: secondUser.publicKey, // Correct poster
+        gig: newGigPda,
+        solution: newSolutionPda,
+        agent: thirdUser.publicKey,
+      } as any)
+      .signers([secondUser])
+      .rpc();
+    
+    // Fetch the solution to verify it worked
+    const verifiedSolution = await program.account.submittedSolution.fetch(newSolutionPda);
+    assert.ok(verifiedSolution.status.success !== undefined);
+    
+    logSuccess("Authorization checks confirmed working", {
+      correctPoster: secondUser.publicKey.toBase58(),
+      solution: newSolutionPda.toBase58(),
+      verifiedStatus: "Success"
+    });
   });
 });

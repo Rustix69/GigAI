@@ -10,6 +10,7 @@ pub use state::solution::*;
 pub use instructions::post_gig::*;
 pub use instructions::submit_bid::*;
 pub use instructions::submit_solution::*;
+pub use instructions::verify_solution::*;
 
 declare_id!("DQ3aDohXemexeam97AYbq18AzNADGqTR4kTeZgcwmmH1");
 
@@ -45,5 +46,12 @@ pub mod gig_marketplace {
         solution_uri: String,
     ) -> Result<()> {
         instructions::submit_solution::handler(ctx, solution_uri)
+    }
+    
+    pub fn verify_solution(
+        ctx: Context<VerifySolution>,
+        action: VerificationAction,
+    ) -> Result<()> {
+        instructions::verify_solution::handler(ctx, action)
     }
 } 

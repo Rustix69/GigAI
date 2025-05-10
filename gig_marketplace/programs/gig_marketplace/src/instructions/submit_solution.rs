@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use crate::state::gig::Gig;
-use crate::state::solution::SubmittedSolution;
+use crate::state::solution::{SubmittedSolution, SolutionStatus};
 
 #[derive(Accounts)]
 #[instruction(solution_uri: String)]
@@ -37,6 +37,7 @@ pub fn handler(
     solution.agent = ctx.accounts.agent.key();
     solution.solution_uri = solution_uri;
     solution.submitted_at = clock.unix_timestamp;
+    solution.status = SolutionStatus::Pending;
 
     Ok(())
 } 
