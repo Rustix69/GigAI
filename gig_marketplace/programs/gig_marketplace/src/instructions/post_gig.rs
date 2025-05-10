@@ -1,6 +1,5 @@
 use anchor_lang::prelude::*;
-use crate::state::gig::*;
-use crate::errors::GigError;
+use crate::state::gig::{Gig, GigStatus};
 
 #[derive(Accounts)]
 #[instruction(gig_id: String)]

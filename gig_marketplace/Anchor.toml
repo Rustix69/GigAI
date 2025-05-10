@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-gig_marketplace = "8oyM8j8ncmBVuSBx9iGK2KNnu14ZZkVhzmgbuCdTGCZx"
+gig_marketplace = "DQ3aDohXemexeam97AYbq18AzNADGqTR4kTeZgcwmmH1"
 
 [registry]
 url = "https://api.apr.dev"

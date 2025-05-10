@@ -20,16 +20,27 @@ describe("gig_marketplace", () => {
   const deadline = new anchor.BN(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
   const secondUser = Keypair.generate();
+  const thirdUser = Keypair.generate(); // New user for bidding tests
   const gigSeed = Buffer.from("gig");
+  const bidSeed = Buffer.from("bid");
   let gigPda: PublicKey;
+  let bidPda: PublicKey;
 
   before(async () => {
-    const airdropTx = await provider.connection.requestAirdrop(
+    // Fund test accounts
+    const airdropTx1 = await provider.connection.requestAirdrop(
       secondUser.publicKey,
       2 * anchor.web3.LAMPORTS_PER_SOL
     );
-    await provider.connection.confirmTransaction(airdropTx);
+    await provider.connection.confirmTransaction(airdropTx1);
     logSuccess("Second user funded with 2 SOL for tests");
+
+    const airdropTx2 = await provider.connection.requestAirdrop(
+      thirdUser.publicKey,
+      3 * anchor.web3.LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(airdropTx2);
+    logSuccess("Third user funded with 3 SOL for tests");
   });
 
   it("Initializes and posts a gig with correct data", async () => {
@@ -189,5 +200,301 @@ describe("gig_marketplace", () => {
     assert.ok(secondUserGigs.some(g => g.account.id === "graphic-design-001"));
 
     logSuccess("Ownership verification completed successfully");
+  });
+
+  // Bid-related tests
+  
+  it("Can submit a bid on a gig", async () => {
+    logSection("Submitting Bid");
+
+    const bidAmount = new anchor.BN(1_200_000_000); // 1.2 SOL
+
+    [bidPda] = await PublicKey.findProgramAddressSync(
+      [bidSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+
+    // Get third user SOL balance before bid
+    const balanceBefore = await provider.connection.getBalance(thirdUser.publicKey);
+    
+    await program.methods
+      .submitBid(bidAmount)
+      .accounts({
+        agent: thirdUser.publicKey,
+        gig: gigPda,
+        bid: bidPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([thirdUser])
+      .rpc();
+
+    // Fetch bid account to verify
+    const bidAccount = await program.account.bid.fetch(bidPda);
+    
+    // Get third user SOL balance after bid
+    const balanceAfter = await provider.connection.getBalance(thirdUser.publicKey);
+    
+    // Verify bid data
+    assert.strictEqual(bidAccount.gig.toBase58(), gigPda.toBase58());
+    assert.strictEqual(bidAccount.agent.toBase58(), thirdUser.publicKey.toBase58());
+    assert.ok(bidAccount.bidAmount.eq(bidAmount));
+    assert.ok(bidAccount.timestamp.toNumber() > 0);
+    
+    // Verify SOL transfer (approximate due to transaction fees)
+    const expectedBalanceDecrease = bidAmount.toNumber();
+    const actualDecrease = balanceBefore - balanceAfter;
+    assert.ok(actualDecrease > expectedBalanceDecrease);
+    assert.ok(actualDecrease < expectedBalanceDecrease + 10000000); // Allow for tx fee
+    
+    logSuccess("Bid submitted successfully", bidAccount);
+  });
+  
+  it("Can submit multiple bids from different users", async () => {
+    logSection("Multiple Bids");
+    
+    // Second user submits a bid on the same gig
+    const secondBidAmount = new anchor.BN(1_050_000_000); // 1.05 SOL
+    
+    const [secondBidPda] = await PublicKey.findProgramAddressSync(
+      [bidSeed, gigPda.toBuffer(), secondUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    await program.methods
+      .submitBid(secondBidAmount)
+      .accounts({
+        agent: secondUser.publicKey,
+        gig: gigPda,
+        bid: secondBidPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([secondUser])
+      .rpc();
+      
+    // Fetch both bids
+    const firstBid = await program.account.bid.fetch(bidPda);
+    const secondBid = await program.account.bid.fetch(secondBidPda);
+    
+    // Verify both bids exist with correct data
+    assert.strictEqual(firstBid.agent.toBase58(), thirdUser.publicKey.toBase58());
+    assert.strictEqual(secondBid.agent.toBase58(), secondUser.publicKey.toBase58());
+    assert.ok(firstBid.bidAmount.eq(new anchor.BN(1_200_000_000)));
+    assert.ok(secondBid.bidAmount.eq(secondBidAmount));
+    
+    logSuccess("Multiple bids confirmed", {
+      firstBid: { agent: firstBid.agent.toBase58(), amount: firstBid.bidAmount.toString() },
+      secondBid: { agent: secondBid.agent.toBase58(), amount: secondBid.bidAmount.toString() }
+    });
+  });
+  
+  it("Can fetch all bids for a specific gig", async () => {
+    logSection("Fetching Bids");
+    
+    // Get all bids
+    const allBids = await program.account.bid.all();
+    
+    // Filter for our test gig
+    const gigBids = allBids.filter(
+      bid => bid.account.gig.toBase58() === gigPda.toBase58()
+    );
+    
+    // Verify we have at least 2 bids for our test gig
+    assert.ok(gigBids.length >= 2);
+    
+    // Verify the bids include those from our test users
+    const thirdUserBid = gigBids.find(
+      bid => bid.account.agent.toBase58() === thirdUser.publicKey.toBase58()
+    );
+    const secondUserBid = gigBids.find(
+      bid => bid.account.agent.toBase58() === secondUser.publicKey.toBase58()
+    );
+    
+    assert.ok(thirdUserBid);
+    assert.ok(secondUserBid);
+    
+    logSuccess(`Found ${gigBids.length} bids for the test gig:`, 
+      gigBids.map(bid => ({
+        agent: bid.account.agent.toBase58(),
+        amount: bid.account.bidAmount.toString()
+      }))
+    );
+  });
+  
+  it("Cannot submit a duplicate bid from the same user", async () => {
+    logSection("Duplicate Bid Test");
+    
+    try {
+      // Try to submit another bid from the third user on the same gig
+      const duplicateBidAmount = new anchor.BN(1_300_000_000);
+      
+      await program.methods
+        .submitBid(duplicateBidAmount)
+        .accounts({
+          agent: thirdUser.publicKey,
+          gig: gigPda,
+          bid: bidPda, // Same PDA as before
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .signers([thirdUser])
+        .rpc();
+        
+      assert.fail("Should have failed with duplicate bid account");
+    } catch (error) {
+      assert.ok(error.toString().includes("Error"));
+      logError("Duplicate bid rejected as expected", error);
+    }
+  });
+
+  // Solution submission tests
+  
+  it("Can submit a solution for a gig", async () => {
+    logSection("Submitting Solution");
+    
+    const solutionUri = "ipfs://QmT5NvUtoM5nWFfrQdVrFtvGfKFmG7AHE8P34isapyhCxX";
+    const solutionSeed = Buffer.from("solution");
+    
+    const [solutionPda] = await PublicKey.findProgramAddressSync(
+      [solutionSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    await program.methods
+      .submitSolution(solutionUri)
+      .accounts({
+        agent: thirdUser.publicKey,
+        gig: gigPda,
+        poster: provider.wallet.publicKey,
+        solution: solutionPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([thirdUser])
+      .rpc();
+      
+    // Fetch the solution account to verify
+    const solutionAccount = await program.account.submittedSolution.fetch(solutionPda);
+    
+    // Verify solution data
+    assert.strictEqual(solutionAccount.gig.toBase58(), gigPda.toBase58());
+    assert.strictEqual(solutionAccount.agent.toBase58(), thirdUser.publicKey.toBase58());
+    assert.strictEqual(solutionAccount.solutionUri, solutionUri);
+    assert.ok(solutionAccount.submittedAt.toNumber() > 0);
+    
+    logSuccess("Solution submitted successfully", {
+      gig: solutionAccount.gig.toBase58(),
+      agent: solutionAccount.agent.toBase58(),
+      uri: solutionAccount.solutionUri,
+      timestamp: solutionAccount.submittedAt.toString()
+    });
+  });
+  
+  it("Multiple agents can submit solutions for the same gig", async () => {
+    logSection("Multiple Solutions");
+    
+    const secondSolutionUri = "ipfs://QmYEA5BXdQUfR8vVXZhZF2mHQY4xtMVGYXmrwG1sYy6iBL";
+    const solutionSeed = Buffer.from("solution");
+    
+    const [secondSolutionPda] = await PublicKey.findProgramAddressSync(
+      [solutionSeed, gigPda.toBuffer(), secondUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    await program.methods
+      .submitSolution(secondSolutionUri)
+      .accounts({
+        agent: secondUser.publicKey,
+        gig: gigPda,
+        poster: provider.wallet.publicKey,
+        solution: secondSolutionPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([secondUser])
+      .rpc();
+      
+    // Fetch both solution accounts
+    const firstSolution = await program.account.submittedSolution.fetch(
+      PublicKey.findProgramAddressSync(
+        [solutionSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+        program.programId
+      )[0]
+    );
+    
+    const secondSolution = await program.account.submittedSolution.fetch(secondSolutionPda);
+    
+    // Verify multiple solutions exist
+    assert.strictEqual(firstSolution.agent.toBase58(), thirdUser.publicKey.toBase58());
+    assert.strictEqual(secondSolution.agent.toBase58(), secondUser.publicKey.toBase58());
+    assert.strictEqual(firstSolution.gig.toBase58(), gigPda.toBase58());
+    assert.strictEqual(secondSolution.gig.toBase58(), gigPda.toBase58());
+    
+    logSuccess("Multiple solutions confirmed", {
+      solution1: { agent: firstSolution.agent.toBase58() },
+      solution2: { agent: secondSolution.agent.toBase58() }
+    });
+  });
+  
+  it("Can fetch all solutions for a specific gig", async () => {
+    logSection("Fetching Solutions");
+    
+    // Get all solutions
+    const allSolutions = await program.account.submittedSolution.all();
+    
+    // Filter for our test gig
+    const gigSolutions = allSolutions.filter(
+      solution => solution.account.gig.toBase58() === gigPda.toBase58()
+    );
+    
+    // Verify we have at least 2 solutions for our test gig
+    assert.ok(gigSolutions.length >= 2);
+    
+    // Verify the solutions include those from our test users
+    const thirdUserSolution = gigSolutions.find(
+      solution => solution.account.agent.toBase58() === thirdUser.publicKey.toBase58()
+    );
+    const secondUserSolution = gigSolutions.find(
+      solution => solution.account.agent.toBase58() === secondUser.publicKey.toBase58()
+    );
+    
+    assert.ok(thirdUserSolution);
+    assert.ok(secondUserSolution);
+    
+    logSuccess(`Found ${gigSolutions.length} solutions for the test gig:`, 
+      gigSolutions.map(solution => ({
+        agent: solution.account.agent.toBase58(),
+        uri: solution.account.solutionUri,
+        submittedAt: solution.account.submittedAt.toString()
+      }))
+    );
+  });
+  
+  it("Cannot submit a duplicate solution from the same user", async () => {
+    logSection("Duplicate Solution Test");
+    
+    try {
+      // Try to submit another solution from the third user on the same gig
+      const duplicateSolutionUri = "ipfs://QmNewSolutionUri";
+      const solutionSeed = Buffer.from("solution");
+      
+      const [solutionPda] = await PublicKey.findProgramAddressSync(
+        [solutionSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+        program.programId
+      );
+      
+      await program.methods
+        .submitSolution(duplicateSolutionUri)
+        .accounts({
+          agent: thirdUser.publicKey,
+          gig: gigPda,
+          poster: provider.wallet.publicKey,
+          solution: solutionPda, // Same PDA as before
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .signers([thirdUser])
+        .rpc();
+        
+      assert.fail("Should have failed with duplicate solution account");
+    } catch (error) {
+      assert.ok(error.toString().includes("Error"));
+      logError("Duplicate solution rejected as expected", error);
+    }
   });
 });
