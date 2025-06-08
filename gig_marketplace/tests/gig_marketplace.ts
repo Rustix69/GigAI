@@ -678,4 +678,172 @@ describe("gig_marketplace", () => {
       verifiedStatus: "Success"
     });
   });
+
+  // Settlement tests
+  it("Can settle a gig after a successful solution", async () => {
+    logSection("Settling Gig with Successful Solution");
+    
+    // Get the solution PDA for the third user (which we approved earlier)
+    const [solutionPda] = await PublicKey.findProgramAddressSync(
+      [solutionSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    // Get the bid PDA for the third user
+    const [bidPda] = await PublicKey.findProgramAddressSync(
+      [bidSeed, gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    // Find the stake vault PDA - this needs to be the actual account that holds the funds
+    // In a real implementation, this would be created when the bid is submitted
+    const [stakeVaultPda] = await PublicKey.findProgramAddressSync(
+      [Buffer.from("stake_vault"), gigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    // Get the bid details to know how much to fund
+    const bid = await program.account.bid.fetch(bidPda);
+    
+    // First let's fund the stake vault PDA to simulate the staked funds
+    const tx = new anchor.web3.Transaction();
+    tx.add(
+      anchor.web3.SystemProgram.transfer({
+        fromPubkey: provider.wallet.publicKey,
+        toPubkey: stakeVaultPda,
+        lamports: bid.bidAmount.toNumber(), // Use the exact bid amount
+      })
+    );
+    await provider.sendAndConfirm(tx);
+    
+    // Get agent's balance before settlement
+    const agentBalanceBefore = await provider.connection.getBalance(thirdUser.publicKey);
+    
+    // Settle the gig
+    await program.methods
+      .settleGig()
+      .accounts({
+        poster: provider.wallet.publicKey,
+        gig: gigPda,
+        solution: solutionPda,
+        bid: bidPda,
+        agentCreator: thirdUser.publicKey,
+        stakeVault: stakeVaultPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .rpc();
+    
+    // Verify gig is now marked as completed
+    const gigAccount = await program.account.gig.fetch(gigPda);
+    const solution = await program.account.submittedSolution.fetch(solutionPda);
+    
+    // Get agent's balance after settlement
+    const agentBalanceAfter = await provider.connection.getBalance(thirdUser.publicKey);
+    
+    // Verify the gig status is now completed
+    assert.strictEqual(gigAccount.status.completed !== undefined, true);
+    
+    // Verify the solution is successful
+    assert.strictEqual(solution.status.success !== undefined, true);
+    
+    // Verify funds were transferred (approximate due to transaction fees)
+    const transferredAmount = agentBalanceAfter - agentBalanceBefore;
+    
+    // The agent should have received approximately the bid amount
+    assert.ok(transferredAmount > 0, "Agent should have received funds");
+    
+    logSuccess("Gig settled successfully", {
+      gig: gigPda.toBase58(),
+      agent: thirdUser.publicKey.toBase58(),
+      status: "Completed",
+      fundsTransferred: transferredAmount / anchor.web3.LAMPORTS_PER_SOL + " SOL"
+    });
+  });
+  
+  it("Cannot settle a gig with a pending solution", async () => {
+    logSection("Settling with Pending Solution");
+    
+    // Create a new gig
+    const newGigId = "test-pending-settlement";
+    const [newGigPda] = await PublicKey.findProgramAddressSync(
+      [gigSeed, Buffer.from(newGigId)],
+      program.programId
+    );
+    
+    await program.methods
+      .postGig(
+        newGigId,
+        "Test gig for settlement validation",
+        new anchor.BN(1_000_000_000),
+        new anchor.BN(Date.now() + 7 * 24 * 60 * 60 * 1000)
+      )
+      .accounts({
+        poster: provider.wallet.publicKey,
+        gig: newGigPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .rpc();
+    
+    // Submit a bid
+    const [newBidPda] = await PublicKey.findProgramAddressSync(
+      [bidSeed, newGigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    await program.methods
+      .submitBid(new anchor.BN(900_000_000))
+      .accounts({
+        agent: thirdUser.publicKey,
+        gig: newGigPda,
+        bid: newBidPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([thirdUser])
+      .rpc();
+    
+    // Submit a solution (which will be in Pending state)
+    const [newSolutionPda] = await PublicKey.findProgramAddressSync(
+      [solutionSeed, newGigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    await program.methods
+      .submitSolution("ipfs://QmTestPendingSolution")
+      .accounts({
+        agent: thirdUser.publicKey,
+        gig: newGigPda,
+        poster: provider.wallet.publicKey,
+        solution: newSolutionPda,
+        systemProgram: SystemProgram.programId,
+      } as any)
+      .signers([thirdUser])
+      .rpc();
+    
+    // Find the stake vault PDA
+    const [newStakeVaultPda] = await PublicKey.findProgramAddressSync(
+      [Buffer.from("stake_vault"), newGigPda.toBuffer(), thirdUser.publicKey.toBuffer()],
+      program.programId
+    );
+    
+    try {
+      // Try to settle the gig with a pending solution - should fail
+      await program.methods
+        .settleGig()
+        .accounts({
+          poster: provider.wallet.publicKey,
+          gig: newGigPda,
+          solution: newSolutionPda,
+          bid: newBidPda,
+          agentCreator: thirdUser.publicKey,
+          stakeVault: newStakeVaultPda,
+          systemProgram: SystemProgram.programId,
+        } as any)
+        .rpc();
+        
+      assert.fail("Should have failed because solution is still pending");
+    } catch (error) {
+      assert.ok(error.toString().includes("SolutionNotVerified"));
+      logError("Settlement with pending solution correctly rejected", error);
+    }
+  });
 });

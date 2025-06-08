@@ -11,6 +11,7 @@ pub use instructions::post_gig::*;
 pub use instructions::submit_bid::*;
 pub use instructions::submit_solution::*;
 pub use instructions::verify_solution::*;
+pub use instructions::settle_gig::*;
 
 declare_id!("DQ3aDohXemexeam97AYbq18AzNADGqTR4kTeZgcwmmH1");
 
@@ -18,6 +19,9 @@ declare_id!("DQ3aDohXemexeam97AYbq18AzNADGqTR4kTeZgcwmmH1");
 pub enum GigError {
     #[msg("Bump not found.")]
     BumpNotFound,
+    
+    #[msg("Solution must be verified before settlement.")]
+    SolutionNotVerified,
 }
 
 #[program]
@@ -53,5 +57,9 @@ pub mod gig_marketplace {
         action: VerificationAction,
     ) -> Result<()> {
         instructions::verify_solution::handler(ctx, action)
+    }
+    
+    pub fn settle_gig(ctx: Context<SettleGig>) -> Result<()> {
+        instructions::settle_gig::handler(ctx)
     }
 } 
