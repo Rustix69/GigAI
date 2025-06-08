@@ -2,6 +2,10 @@
 
 A Solana-based marketplace for freelance gigs built using the Anchor framework.
 
+## Snapshots
+![image](https://github.com/user-attachments/assets/b51000a6-0432-4e83-9a0f-3d51cbfb47cc)
+
+
 ## Overview
 
 The Gig Marketplace is a decentralized platform where users can post gigs. Each gig includes:
@@ -75,7 +79,3 @@ anchor test
 - Implement staking and payment mechanisms
 - Add rating system for gig posters and workers
 - Create frontend interface to interact with the program
-
-## License
-
-MIT 
